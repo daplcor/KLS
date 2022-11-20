@@ -1,0 +1,56 @@
+(load "dependencies/dependencies.repl")
+
+(begin-tx)
+; \\\ (env-enable-repl-natives true)
+(env-keys ["kls-admin"])
+(env-data 
+  { 
+    "kls-admin": { "keys": ["kls-admin"], "pred": "="},
+    "upgrade": true
+  })
+
+(load "kls-policy-v3.pact")
+
+(commit-tx)
+
+
+
+(env-gas 0)
+(env-gaslog)
+(read-msg)
+(use free.kls-policy-v3)
+
+;; Fund each bank
+(env-keys ["bob"])
+(env-sigs
+  [{
+    "key": "bob",
+    "caps": [
+      (coin.TRANSFER "bank" "bob" 50000.0)
+      (coin.TRANSFER "bank" "bob" 50000.0)
+    ]
+  }])
+;  (coin.transfer "bank" "bob" 50000.0)
+;  (coin.transfer "bank" "bob" 50000.0)
+
+;  (commit-tx)
+
+;  (insert accounts "Alice" {"balance": 10.0 })
+;  (insert accounts "Bob" {"balance": 0.0 })
+(env-gaslog)
+
+(env-gas 0)
+(env-gaslog)
+;  (transfer "Alice" "Bob" 5.0)
+(env-gaslog)
+;  (expect "Cost: simple transfer" 281 (env-gas))
+
+;  (expect "Alice was debited 5" 5.0 (balance "Alice"))
+;  (expect "Bob was credited 5" 5.0 (balance "Bob"))
+(begin-tx)
+(coin.get-balance "person1")
+
+;  (expect
+;      "sender balance correct"
+;      100000.0 (funglble-v2::get-balance person1))
+(commit-tx)
