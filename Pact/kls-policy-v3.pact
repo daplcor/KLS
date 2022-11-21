@@ -74,14 +74,21 @@
     public-minted:decimal
   )
 
-(defschema counter-schema
-  count:integer
+ (defschema counter-schema
+  @doc "Store Counter"
+  counter:integer
   )
 
   (defschema account-schema
     account:string
     minted:integer
   )
+
+  (defschema free-mint-schema
+    account:string
+    guard:guard
+    freecount:integer
+    )
 
   (defschema whitelist-schema
     account:string
@@ -105,11 +112,12 @@
   (deftable policies:{policy-schema})
   (deftable collection-info:{collection-schema})
   (deftable mint-status:{mint-schema})
-  (deftable counter:{counter-schema})
+  (deftable counters:{counter-schema})
   (deftable account-details:{account-schema})
   (deftable whitelists:{whitelist-schema})
   (deftable traits:{traits-schema})
   (deftable metadata:{token-metadata})
+  (deftable free-mint:{free-mint-schema})
 
 
 
@@ -137,6 +145,50 @@
     spec:object{quote-spec})
 
   (deftable quotes:{quote-schema})
+
+
+  ; ============================================
+  ; ==                Counters                ==
+  ; ============================================
+
+
+
+  (defcap INCREMENT ()
+    @doc "Private capability for incrementing the counter"
+    true
+  )
+
+  (defun increment-counter:integer (counter-id:string)
+    @doc "Increments the given counter and returns the new count"
+
+    (require-capability (INCREMENT))
+
+    (with-read counters counter-id
+      { "counter" := count }
+      (let
+        (
+          (increment (+ count 1))
+        )
+        (update counters counter-id
+          { "counter": increment }  
+        )
+
+        increment
+      )
+    )
+  )
+
+  (defun get-counter:integer (counter-id:string)
+    (at "counter" (read counters counter-id ["counter"]))
+  )
+
+  (defun init-counter:string (counter-id:string)
+    @doc "Initializes the guards and creates the tables for the module"
+
+    (insert counters counter-id
+      { "counter": 0 }  
+    )
+  )
 
 
   ; ============================================
@@ -183,7 +235,7 @@
    (at 'max-per-wh (get-details))
  )
 
-   (defun enforce-whitelist:bool (account:string guard:guard)
+  (defun enforce-whitelist:bool (account:string guard:guard)
     (let ((max-per-wh:integer (get-wl-limit account)))
       (with-read whitelists account{
        'guard:= g,
@@ -194,6 +246,22 @@
      )
     )
    )
+
+   (defun get-free-limit (account:string)
+   (at 'max-per-free (get-details))
+ )
+
+   (defun enforce-free-mint:bool (account:string guard:guard)
+   (let ((max-per-free:integer (get-free-limit account)))
+     (with-read counters account{
+      'guard:= g,
+      'claimed:= claimed
+     }
+      (enforce (= g guard) "Guards doesn't match.")
+      (enforce (< claimed  max-per-free) (format "You can only Mint {} for free" [max-per-free]))
+    )
+   )
+  )
 
    (defun get-account-minted:integer (account:string)
    (with-default-read account-details account
@@ -283,7 +351,7 @@
     (bind (get-policy token)
       { 'fungible := fungible:module{fungible-v2}
        ,'royalty-rate:= royalty-rate:decimal
-       ,'transaction-rate:= transaction-rate
+       ,'transaction-rate:= transaction-rate:decimal
        ,'creator:= creator:string
       }
     (let* ( (spec:object{quote-spec} (read-msg QUOTE-MSG-KEY))
@@ -292,8 +360,9 @@
             (recipient-guard:guard (at 'recipient-guard spec))
             (recipient-details:object (fungible::details recipient))
             (sale-price:decimal (* amount price))
+            (transaction-payout:decimal (* sale-price transaction-rate))
             (royalty-payout:decimal
-               (floor (* sale-price (+ royalty-rate transaction-rate)) (fungible::precision))) )
+               (floor (* sale-price (+ royalty-rate)) (fungible::precision))) )
       (fungible::enforce-unit sale-price)
       (enforce (< 0.0 price) "Offer price must be positive")
       (enforce (=
@@ -327,12 +396,13 @@
           , 'recipient := recipient:string
           }
           (let* ((sale-price:decimal (* amount price))
+                (transaction-payout:decimal (* sale-price transaction-rate))
                  (royalty-payout:decimal
-                    (floor (* sale-price (+ royalty-rate transaction-rate)) (fungible::precision)))
-                 (payout:decimal (- sale-price (+ royalty-payout transaction-payout)) )
+                    (floor (* sale-price royalty-rate) (fungible::precision)))
+                 (payout:decimal (- sale-price (+ royalty-payout transaction-payout) )) )
             (if
               (> royalty-payout 0.0)
-              (fungible::transfer buyer creator royalty-payout transaction-payout)
+              (fungible::transfer buyer creator royalty-payout)
               "No royalty")
                (fungible::transfer buyer recipient payout))
             (update policies qtoken {
@@ -341,43 +411,6 @@
             true
           )
    )
-  )
-
-  (defun enforce-buy:bool
-    ( token:object{token-info}
-      seller:string
-      buyer:string
-      buyer-guard:guard
-      amount:decimal
-      sale-id:string )
-    (enforce-ledger)
-    (enforce-sale-pact sale-id)
-    (bind (get-policy token)
-      { 'fungible := fungible:module{fungible-v2}
-      , 'creator:= creator:string
-      , 'royalty-rate:= royalty-rate:decimal
-      }
-      (with-read quotes sale-id { 'id:= qtoken, 'spec:= spec:object{quote-spec} }
-        (enforce (= qtoken (at 'id token)) "incorrect sale token")
-        (bind spec
-          { 'price := price:decimal
-          , 'recipient := recipient:string
-          }
-          (let* ((sale-price:decimal (* amount price))
-                 (royalty-payout:decimal
-                  (floor (* sale-price royalty-rate) (fungible::precision)))
-               (payout:decimal (- sale-price royalty-payout)) )
-          (if
-            (> royalty-payout 0.0)
-            (fungible::transfer buyer creator royalty-payout)
-            "No royalty")
-            (fungible::transfer buyer recipient payout))
-            (update policies qtoken {
-              "owner": buyer
-              }))
-            true
-      )
-    )
   )
 
   (defun enforce-sale-pact:bool (sale:string)
@@ -405,7 +438,7 @@
     (enforce-ledger)
     (enforce false "Transfer prohibited")
   )
-)
+
 
 ; ============================================
 ; ==               Free Mint                ==
@@ -457,25 +490,20 @@
 ;         )
 ;         (increase-count FREE_NFTS_MINTED_COUNT_KEY 1.0)
 ;     ))
-)
 
-(defun initdb:string ()
-  @doc "Initializes the guards and creates the tables for the module"
-
-  (with-capability (GOVERNANCE)
 
 )
-)
-(if (read-msg 'upgrade )
+(if (read-msg "upgrade")
   ["upgrade complete"]
   [ (create-table free.kls-policy-v3.quotes)
     (create-table free.kls-policy-v3.policies)
     (create-table free.kls-policy-v3.collection-info)
     (create-table free.kls-policy-v3.mint-status)
-    (create-table free.kls-policy-v3.counter)
+    (create-table free.kls-policy-v3.counters)
     (create-table free.kls-policy-v3.account-details)
     (create-table free.kls-policy-v3.whitelists)
     (create-table free.kls-policy-v3.traits)
     (create-table free.kls-policy-v3.metadata)
+    (create-table free.kls-policy-v3.free-mint)
      ]
 )
